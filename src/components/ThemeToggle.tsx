@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 type Theme = "light" | "dark";
 
 function setThemeAttr(next: Theme) {
-  document.documentElement.setAttribute("data-theme", next);
+  // disabled: no SSR theme mutation
   localStorage.setItem("theme", next);
   // ✅ also persist to cookie so SSR matches exactly
   document.cookie = `theme=${next}; path=/; max-age=31536000; samesite=lax`;
