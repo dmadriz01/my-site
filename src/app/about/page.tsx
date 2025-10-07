@@ -1,3 +1,4 @@
+/* eslint-disable react/no-unescaped-entities */
 export default function About() {
     return (
       <main className="min-h-screen flex flex-col items-center justify-center bg-gray-50 text-gray-800">
