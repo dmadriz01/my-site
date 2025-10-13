@@ -2,9 +2,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { z } from "zod";
-import { getPool } from "../../../lib/db"; // keep this import
+import { getPool } from "../../../lib/db";
 
-// ------------ Inline schema (temporary to unblock) ------------
+// ------------ Inline schema (typed, no `.datetime()` to avoid version issues) ------------
 const EventType = z.enum(["page_view", "click", "custom"]);
 
 const CommonProps = z.object({
@@ -29,14 +29,14 @@ const ClickProps = CommonProps.extend({
   selector: z.string().max(128).optional(),
   text_sample: z.string().max(64).optional(),
 });
-const CustomProps = z.record(z.any()).default({});
+const CustomProps = z.record(z.unknown()).default({});
 
 const Envelope = z
   .object({
     event_id: z.string().uuid(),
     event_type: EventType,
     schema_version: z.number().int().min(1).default(1),
-    sent_at: z.string().datetime(),
+    sent_at: z.string(), // keep simple; or use z.string().datetime() if on zod >= 3.23
     source: z.enum(["web_client", "web_server"]),
     user_id: z.string().min(1).optional().nullable(),
     device_id: z.string().min(1),
@@ -56,7 +56,15 @@ const Envelope = z
   .refine((d) => !!(d.user_id || d.device_id), {
     message: "Either user_id or device_id must be present",
   });
-// --------------------------------------------------------------
+
+type EnvelopeT = z.infer<typeof Envelope>;
+type PropsSanitized = Record<string, unknown>;
+type EnrichedEnvelope = EnvelopeT & {
+  props: PropsSanitized;
+  received_at: string;
+  ip_hash: string;
+};
+// ---------------------------------------------------------------------------------------
 
 // Accept up to 50KB per event
 const MAX_BODY_BYTES = 50 * 1024;
@@ -71,31 +79,29 @@ export async function POST(req: NextRequest) {
   const raw = await req.text();
   if (raw.length > MAX_BODY_BYTES) {
     return NextResponse.json({ ok: false, error: "payload too large" }, { status: 413 });
-  }
+    }
 
-  let parsed: z.infer<typeof Envelope>;
+  let parsed: EnvelopeT;
   try {
     parsed = Envelope.parse(JSON.parse(raw));
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "invalid schema", detail: e?.message ?? String(e) },
-      { status: 400 }
-    );
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ ok: false, error: "invalid schema", detail }, { status: 400 });
   }
 
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "";
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "";
   const salt = process.env.HASH_SALT || "dev_salt_change_me";
   const ip_hash = crypto.createHash("sha256").update(ip + salt).digest("hex");
 
-  const props: Record<string, any> = {};
-  for (const [k, v] of Object.entries(parsed.props || {})) {
+  const props: PropsSanitized = {};
+  for (const [k, v] of Object.entries(parsed.props ?? {})) {
     props[k] = typeof v === "string" ? v.slice(0, 1024) : v;
   }
-  delete props.email;
-  delete props.name;
-  delete props.phone;
+  delete (props as Record<string, unknown>)["email"];
+  delete (props as Record<string, unknown>)["name"];
+  delete (props as Record<string, unknown>)["phone"];
 
-  const enriched = {
+  const enriched: EnrichedEnvelope = {
     ...parsed,
     props,
     received_at: received_at.toISOString(),
@@ -108,7 +114,7 @@ export async function POST(req: NextRequest) {
       `INSERT INTO bronze_events(event_id, source, payload, received_at)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (event_id) DO NOTHING`,
-      [enriched.event_id, enriched.source ?? "web_client", enriched as any, received_at]
+      [enriched.event_id, enriched.source ?? "web_client", enriched, received_at]
     );
   } catch (err) {
     console.error("bronze insert failed", err);
